@@ -1,0 +1,47 @@
+{
+  "name": "RaceAI - 競馬予想",
+  "short_name": "RaceAI",
+  "description": "中央競馬・地方競馬のレース一覧と、推定勝率・単勝オッズ・期待値・推奨買い目・過去検証を表示する競馬予想アプリ（デモデータ版）。",
+  "lang": "ja",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui", "browser"],
+  "orientation": "portrait",
+  "background_color": "#060A08",
+  "theme_color": "#060A08",
+  "categories": ["sports", "utilities"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "レース一覧",
+      "short_name": "レース",
+      "url": "./index.html#/races"
+    },
+    {
+      "name": "過去検証",
+      "short_name": "検証",
+      "url": "./index.html#/verify"
+    }
+  ]
+}

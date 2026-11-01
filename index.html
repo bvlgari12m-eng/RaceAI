@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#060A08" />
+<meta name="description" content="中央競馬・地方競馬のレース一覧、推定勝率、単勝オッズ、期待値、推奨買い目、過去検証を表示する競馬予想PWA（デモデータ版）。" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="RaceAI" />
+<meta name="format-detection" content="telephone=no" />
+<title>RaceAI — 競馬予想</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="icons/icon-180.png" />
+<link rel="icon" type="image/png" href="icons/icon-192.png" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">R</div>
+    <div class="brand-text">
+      <h1>RaceAI</h1>
+      <span>競馬予想 / DEMO</span>
+    </div>
+  </div>
+  <div class="header-actions">
+    <button class="icon-btn" id="refresh-btn" type="button" aria-label="データを再取得">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
+      </svg>
+    </button>
+  </div>
+</header>
+
+<main id="app" aria-live="polite">
+  <div class="loading-veil">
+    <div class="skeleton"></div>
+    <div class="skeleton"></div>
+    <div class="skeleton"></div>
+  </div>
+</main>
+
+<nav class="tabbar" role="tablist" aria-label="メインナビゲーション">
+  <button type="button" role="tab" data-tab="races" aria-selected="true">
+    <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 20V9l8-5 8 5v11" /><path d="M4 20h16" /><path d="M9 20v-6h6v6" />
+    </svg>
+    <span>レース</span>
+  </button>
+  <button type="button" role="tab" data-tab="verify" aria-selected="false">
+    <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 19V5" /><path d="M4 19h16" /><path d="M8 15l3.5-4.5L15 13l4-6" />
+    </svg>
+    <span>検証</span>
+  </button>
+  <button type="button" role="tab" data-tab="data" aria-selected="false">
+    <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+      <ellipse cx="12" cy="6" rx="7" ry="3" /><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" /><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+    </svg>
+    <span>データ</span>
+  </button>
+</nav>
+
+<noscript>
+  <p style="padding:24px;color:#E9F2ED;text-align:center">このアプリは JavaScript が必要です。</p>
+</noscript>
+
+<script src="js/predictor.js"></script>
+<script src="js/odds.js"></script>
+<script src="js/backtest.js"></script>
+<script src="js/data-loader.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var Predictor = window.RaceAIPredictor;
+  var Odds = window.RaceAIOdds;
+  var Backtest = window.RaceAIBacktest;
+  var Loader = window.RaceAIDataLoader;
+
+  var state = {
+    dataset: null,
+    snapshot: null,
+    loading: true,
+    route: { name: 'races', id: null },
+    date: null,
+    org: 'all',
+    sort: 'prob',
+    expanded: null,
+    verification: null,
+    predCache: {},
+    recCache: {},
+    swReady: false,
+    cacheCleared: false
+  };
+
+  var forceFailOnce = /(?:\?|&)fail=1/.test(location.search);
+
+  /* ---------------------------------------------------------- */
+  /* ユーティリティ                                              */
+  /* ---------------------------------------------------------- */
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function pct(v, d) { return (v * 100).toFixed(d === undefined ? 1 : d) + '%'; }
+
+  function yen(v) {
+    var n = Math.round(v);
+    var s = Math.abs(n).toLocaleString('ja-JP');
+    return (n < 0 ? '-' : '') + '¥' + s;
+  }
+
+  function signedYen(v) { return (v > 0 ? '+' : '') + yen(v); }
+
+  var JST = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hourCycle: 'h23'
+  });
+
+  function jstParts(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    var out = {};
+    JST.formatToParts(d).forEach(function (p) {
+      if (p.type !== 'literal') out[p.type] = p.value;
+    });
+    return out;
+  }
+
+  function dt(iso) {
+    var p = jstParts(iso);
+    return p ? p.year + '/' + p.month + '/' + p.day + ' ' + p.hour + ':' + p.minute + ':' + p.second : '\u2014';
+  }
+
+  function hm(iso) {
+    var p = jstParts(iso);
+    return p ? p.hour + ':' + p.minute + ':' + p.second : '\u2014';
+  }
+
+  function pad(n) { return n < 10 ? '0' + n : String(n); }
+
+  function dateLabel(dstr) {
+    var parts = dstr.split('-');
+    return parseInt(parts[1], 10) + '/' + parseInt(parts[2], 10);
+  }
+
+  function weekdayOf(dstr) {
+    var p = dstr.split('-');
+    var d = new Date(Date.UTC(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10)));
+    return ['\u65e5', '\u6708', '\u706b', '\u6c34', '\u6728', '\u91d1', '\u571f'][d.getUTCDay()];
+  }
+
+  function findMeeting(id) {
+    var m = null;
+    (state.dataset.meetings || []).forEach(function (x) { if (x.id === id) m = x; });
+    return m;
+  }
+
+  function findRace(id) {
+    var r = null;
+    (state.dataset.races || []).forEach(function (x) { if (x.id === id) r = x; });
+    return r;
+  }
+
+  function predict(race) {
+    if (!state.predCache[race.id]) {
+      state.predCache[race.id] = Predictor.predictRace(race);
+    }
+    return state.predCache[race.id];
+  }
+
+  function recommendation(race) {
+    if (!state.recCache[race.id]) {
+      state.recCache[race.id] = Odds.buildRecommendations(race, predict(race));
+    }
+    return state.recCache[race.id];
+  }
+
+  function verification() {
+    if (!state.verification) state.verification = Backtest.run({});
+    return state.verification;
+  }
+
+  var TABS = { races: true, verify: true, data: true };
+
+  function parseHash() {
+    var h = (location.hash || '').replace(/^#\/?/, '');
+    if (!h) return { name: 'races', id: null };
+    var parts = h.split('/');
+    if (parts[0] === 'race' && parts[1]) return { name: 'race', id: decodeURIComponent(parts[1]) };
+    if (TABS[parts[0]]) return { name: parts[0], id: null };
+    return { name: 'races', id: null };
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 共通パーツ                                                  */
+  /* ---------------------------------------------------------- */
+
+  function statusBar() {
+    var s = state.snapshot || {};
+    var label, st, right = '';
+    if (s.status === 'loading') {
+      label = 'データを取得しています…'; st = 'loading';
+    } else if (s.status === 'ready') {
+      label = 'デモデータ／正常'; st = 'ready';
+      right = hm(s.fetchedAt) + ' 取得';
+    } else if (s.status === 'stale') {
+      label = 'キャッシュ表示（最新ではありません）'; st = 'stale';
+      right = hm(s.cachedAt || s.fetchedAt) + ' 時点';
+    } else if (s.status === 'error') {
+      label = '取得失敗'; st = 'error';
+      right = s.fetchedAt ? '前回 ' + hm(s.fetchedAt) : 'データなし';
+    } else {
+      label = '待機中'; st = 'loading';
+    }
+    return '' +
+      '<div class="statusbar" data-state="' + st + '">' +
+        '<span class="dot" aria-hidden="true"></span>' +
+        '<span>' + esc(label) + '</span>' +
+        '<span class="spacer"></span>' +
+        '<span class="demo-tag">DEMO</span>' +
+        (right ? '<span>' + esc(right) + '</span>' : '') +
+      '</div>';
+  }
+
+  function banners() {
+    var s = state.snapshot || {};
+    var out = '';
+
+    if (s.status === 'error') {
+      var hasPrev = !!state.dataset;
+      out += '<div class="banner" data-tone="error">' +
+        '<span class="banner-icon">' + icon('alert') + '</span>' +
+        '<div><strong>データ取得に失敗しました</strong>' +
+        esc(s.error ? s.error.message : '原因不明のエラー') +
+        (hasPrev
+          ? '<span class="meta">画面に表示しているのは ' + esc(dt(s.fetchedAt)) + ' に取得した前回データです。最新のデータではありません。</span>'
+          : '<span class="meta">表示できるデータがありません。</span>') +
+        (s.error && s.error.code ? '<span class="meta">code: ' + esc(s.error.code) + '</span>' : '') +
+        '</div></div>';
+    }
+
+    if (s.status === 'stale') {
+      out += '<div class="banner" data-tone="warn">' +
+        '<span class="banner-icon">' + icon('alert') + '</span>' +
+        '<div><strong>オフラインキャッシュを表示しています</strong>' +
+        'ネットワークに接続できないため、' + esc(dt(s.cachedAt || s.fetchedAt)) + ' に保存されたデータを表示しています。最新ではありません。' +
+        '</div></div>';
+    }
+
+    if (state.dataset && state.dataset.dataset && state.dataset.dataset.kind === 'demo') {
+      out += '<div class="banner" data-tone="info">' +
+        '<span class="banner-icon">' + icon('info') + '</span>' +
+        '<div><strong>デモデータで動作しています</strong>' +
+        '開催・出走馬・オッズ・成績はすべて架空の値です。実データ取得APIは未接続です。' +
+        '</div></div>';
+    }
+
+    return out;
+  }
+
+  function icon(name) {
+    var p = {
+      alert: '<path d="M12 9v4M12 17h.01M10.3 3.9 2.4 17.4A2 2 0 0 0 4.1 20.4h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>',
+      info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+      back: '<path d="M15 18l-6-6 6-6"/>',
+      lock: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>'
+    }[name] || '';
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">' + p + '</svg>';
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 画面1: レース一覧                                           */
+  /* ---------------------------------------------------------- */
+
+  function racesView() {
+    var ds = state.dataset;
+    var dates = [];
+    (ds.meetings || []).forEach(function (m) {
+      if (dates.indexOf(m.date) < 0) dates.push(m.date);
+    });
+    dates.sort();
+
+    if (!state.date || dates.indexOf(state.date) < 0) state.date = dates[0] || null;
+
+    var dateHtml = dates.map(function (d) {
+      return '<button type="button" class="date-pill" role="tab" data-act="date" data-date="' + d + '" aria-selected="' + (d === state.date) + '">' +
+        '<span class="d num">' + dateLabel(d) + '</span>' +
+        '<span class="w">' + weekdayOf(d) + '曜</span>' +
+        '</button>';
+    }).join('');
+
+    var meetings = (ds.meetings || []).filter(function (m) {
+      if (m.date !== state.date) return false;
+      if (state.org !== 'all' && m.org !== state.org) return false;
+      return true;
+    });
+
+    var body = '';
+    if (!meetings.length) {
+      body = '<div class="section"><div class="empty"><strong>該当する開催がありません</strong>条件を変更してください。</div></div>';
+    } else {
+      body = '<div class="section">' + meetings.map(trackBlock).join('') + '</div>';
+    }
+
+    return '' +
+      '<div class="datestrip" role="tablist" aria-label="開催日">' + dateHtml + '</div>' +
+      '<div class="segmented" role="tablist" aria-label="主催">' +
+        '<button type="button" data-act="org" data-org="all" aria-selected="' + (state.org === 'all') + '">すべて</button>' +
+        '<button type="button" data-act="org" data-org="jra" aria-selected="' + (state.org === 'jra') + '">中央競馬 (JRA)</button>' +
+        '<button type="button" data-act="org" data-org="nar" aria-selected="' + (state.org === 'nar') + '">地方競馬 (NAR)</button>' +
+      '</div>' +
+      body +
+      '<p class="footnote">表示中のレースはすべてデモ開催です。実際の開催日程・出走表ではありません。</p>';
+  }
+
+  function trackBlock(meeting) {
+    var races = meeting.raceIds.map(findRace).filter(Boolean);
+    var rows = races.sort(function (a, b) { return a.raceNo - b.raceNo; }).map(raceRow).join('');
+
+    return '<div class="track-block">' +
+      '<div class="track-head">' +
+        '<span class="org" data-org="' + esc(meeting.org) + '">' + (meeting.org === 'jra' ? 'JRA' : 'NAR') + '</span>' +
+        '<h3>' + esc(meeting.trackName) + '</h3>' +
+        '<div class="cond">' +
+          '<span>' + esc(meeting.weather || '—') + '</span>' +
+          '<span>' + esc(meeting.trackCondition || '—') + '</span>' +
+        '</div>' +
+      '</div>' + rows + '</div>';
+  }
+
+  function raceRow(race) {
+    var rec = recommendation(race);
+    var badge = rec.verdict.key === 'bet'
+      ? '<span class="pill" data-tone="accent">推奨 ' + rec.tickets.length + '点</span>'
+      : '<span class="pill" data-tone="muted">見送り</span>';
+    var evBest = rec.tickets.length ? Math.max.apply(null, rec.tickets.map(function (t) { return t.ev; })) : null;
+
+    return '<button type="button" class="race-row" data-act="open-race" data-id="' + esc(race.id) + '">' +
+      '<div class="time num">' + esc(race.startTime) +
+        '<div class="no">' + race.raceNo + 'R</div>' +
+      '</div>' +
+      '<div class="body">' +
+        '<div class="name">' + esc(race.name) + '</div>' +
+        '<div class="meta">' +
+          '<span>' + esc(race.surface) + ' ' + race.distance + 'm</span>' +
+          '<span>・' + esc(race.classLabel) + '</span>' +
+          '<span>・' + race.horses.length + '頭</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="right">' + badge +
+        (evBest ? '<span class="pill" data-tone="gold">EV ' + evBest.toFixed(2) + '</span>' : '') +
+      '</div>' +
+    '</button>';
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 画面2: レース詳細                                           */
+  /* ---------------------------------------------------------- */
+
+  function raceView(id) {
+    var race = findRace(id);
+    if (!race) {
+      return '<div class="section"><div class="empty"><strong>レースが見つかりません</strong>' +
+        '<button class="back-btn" data-act="back">← レース一覧に戻る</button></div></div>';
+    }
+
+    var pred = predict(race);
+    var rec = recommendation(race);
+    var meeting = findMeeting(race.meetingId);
+
+    var horses = pred.horses.slice();
+    if (state.sort === 'ev') {
+      horses.sort(function (a, b) { return (b.winProb * b.odds) - (a.winProb * a.odds); });
+    } else if (state.sort === 'pop') {
+      horses.sort(function (a, b) { return (a.popularity || 99) - (b.popularity || 99); });
+    }
+
+    var top = pred.horses[0];
+    var verdictHtml = '<div class="verdict" data-verdict="' + rec.verdict.key + '">' +
+      '<div class="mark">' + (rec.verdict.key === 'bet' ? '◎' : '—') + '</div>' +
+      '<div><div class="vlabel">' + (rec.verdict.key === 'bet' ? '推奨買い目あり' : '見送り推奨') + '</div>' +
+      '<div class="vmain">' + esc(top.name) + '（' + top.num + '番）' + pct(top.winProb) + '</div>' +
+      '<div class="vnote">' + esc(rec.verdict.note) + '</div></div></div>';
+
+    return '<div class="race-hero">' +
+        '<button type="button" class="back-btn" data-act="back">' + icon('back') + ' レース一覧</button>' +
+        '<div class="hero-card">' +
+          '<div class="hero-top"><span>' + esc(race.trackName) + '</span><span>・</span><span>' + race.raceNo + 'R</span><span>・</span><span>' + esc(race.startTime) + ' 発走</span></div>' +
+          '<h2 class="hero-title">' + esc(race.name) + '</h2>' +
+          '<div class="hero-sub">' + esc(race.classLabel) + '　' + esc(race.prize) + '</div>' +
+          '<div class="hero-chips">' +
+            '<span>' + esc(race.surface) + ' ' + race.distance + 'm（' + esc(race.turn) + '回り）</span>' +
+            '<span>' + race.horses.length + '頭</span>' +
+            '<span>天候 ' + esc(race.weather) + '</span>' +
+            '<span>馬場 ' + esc(race.trackCondition) + '</span>' +
+            '<span>想定 ' + esc(pred.paceLabel) + '</span>' +
+            '<span>予測スコア集中度（デモ・精度未検証） ' + pct(pred.confidence, 0) + '</span>' +
+          '</div>' +
+          verdictHtml +
+        '</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>推奨買い目</h2><span class="hint">期待値 ' + rec.options.evThreshold.toFixed(2) + ' 以上</span></div>' +
+        (rec.tickets.length ? rec.tickets.map(ticketCard).join('') : emptyTickets()) +
+        '<div class="note">期待値 = 推定勝率 × オッズ。単勝・複勝はデモオッズ、馬連・3連複はオッズ未提供のため確率のみを表示します。' +
+        '控除率（参考値 ' + pct(rec.marketTakeout || 0.2, 0) + '）を上回る買い目だけが「妙味あり」になります。</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>出走馬 ' + horses.length + '頭</h2><span class="hint">タップで根拠を表示</span></div>' +
+        '<div class="segmented" role="tablist" aria-label="並び順" style="margin:0 0 12px">' +
+          '<button type="button" data-act="sort" data-sort="prob" aria-selected="' + (state.sort === 'prob') + '">推定勝率順</button>' +
+          '<button type="button" data-act="sort" data-sort="ev" aria-selected="' + (state.sort === 'ev') + '">期待値順</button>' +
+          '<button type="button" data-act="sort" data-sort="pop" aria-selected="' + (state.sort === 'pop') + '">人気順</button>' +
+        '</div>' +
+        '<div class="horse-list">' + horses.map(horseCard).join('') + '</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>組合せ確率（参考）</h2><span class="hint">オッズ未提供</span></div>' +
+        comboBoard(pred) +
+        '<div class="note">Plackett–Luce モデルによる上位進出確率です。馬連・3連複の実際のオッズは未接続のため、期待値は算出していません。</div>' +
+      '</div>' +
+
+      '<p class="footnote">' + esc(meeting ? meeting.trackName : '') + ' ' + race.raceNo + 'R／オッズ更新（デモ）' + esc(dt(race.oddsUpdatedAt)) +
+      '<br>このレースの出走馬・オッズは架空のデモデータです。</p>';
+  }
+
+  function emptyTickets() {
+    return '<div class="empty"><strong>このレースは見送り判定です</strong>' +
+      '期待値が閾値を超える買い目がありませんでした。見送りも1つの判断です。</div>';
+  }
+
+  function ticketCard(t) {
+    var tier = Odds.evTier(t.ev);
+    return '<div class="ticket">' +
+      '<div class="ticket-top">' +
+        '<span class="ticket-type">' + esc(t.type) + '</span>' +
+        '<span class="ticket-name">' + t.num + '番 ' + esc(t.name) + '</span>' +
+        '<span class="ticket-stake">' + yen(t.stake) + '</span>' +
+      '</div>' +
+      '<dl class="ticket-stats">' +
+        '<div><dt>' + esc(t.probKind) + '</dt><dd>' + pct(t.prob) + '</dd></div>' +
+        '<div><dt>オッズ</dt><dd>' + t.odds.toFixed(1) + '<small style="font-size:10px">倍</small></dd></div>' +
+        '<div><dt>期待値</dt><dd style="color:' + (t.ev >= 1.05 ? 'var(--accent)' : 'var(--text)') + '">' + t.ev.toFixed(2) + '</dd></div>' +
+      '</dl>' +
+      '<div style="margin-top:8px"><span class="ev-badge" data-tier="' + tier.key + '">' + esc(tier.label) + '</span>' +
+        '<span class="hint" style="font-size:10.5px;color:var(--text-3);margin-left:6px">想定払戻 ' + yen(t.stake * t.ev) + '</span></div>' +
+      '<ul class="ticket-reasons">' + t.reasons.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>' +
+    '</div>';
+  }
+
+  function horseCard(h) {
+    var ev = h.winProb * h.odds;
+    var tier = Odds.evTier(ev);
+    var expanded = state.expanded === h.num;
+    var barWidth = Math.min(100, h.winProb * 220);
+
+    var detail = '';
+    if (expanded) {
+      var rows = Predictor.FACTORS.map(function (f) {
+        var raw = h.factors[f.key] || { score: 0.5, note: '' };
+        var w = Math.round(raw.score * 100);
+        return '<div class="factor-row">' +
+          '<span class="fl">' + esc(f.label) + '</span>' +
+          '<span class="fbar"><i data-weak="' + (raw.score < 0.5 ? 1 : 0) + '" style="width:' + w + '%"></i></span>' +
+          '<span class="fv">' + w + '</span>' +
+        '</div>';
+      }).join('');
+
+      var runs = (h.recent || []).map(function (r) {
+        return '<span class="run-chip"><b>' + r.place + '着</b>/' + r.field + '頭 ' + r.distance + 'm ' + r.going + '</span>';
+      }).join('');
+
+      detail = '<div class="horse-detail">' +
+        '<div class="factor-grid">' + rows + '</div>' +
+        '<div class="recent-runs">' + runs + '</div>' +
+        '<div class="detail-meta">' +
+          '<span>' + esc(h.sex) + h.age + '歳</span>' +
+          '<span>斤量 ' + h.weight.toFixed(1) + 'kg</span>' +
+          '<span>' + esc(h.jockey) + '</span>' +
+          '<span>' + esc(h.trainer) + '</span>' +
+          '<span>脚質 ' + esc(h.style) + '</span>' +
+          '<span>中' + h.daysSinceLast + '日</span>' +
+          '<span>馬体重 ' + h.bodyWeight + 'kg(' + (h.bodyWeightDiff > 0 ? '+' : '') + h.bodyWeightDiff + ')</span>' +
+          '<span>複勝率 ' + pct(h.placeProb) + '</span>' +
+        '</div>' +
+        '<div class="note" style="margin-top:10px">' + esc(Predictor.reasonsFor(h, 3).join('／') || '際立った優位材料はありません') + '</div>' +
+      '</div>';
+    }
+
+    return '<div class="horse-card" data-expanded="' + expanded + '" data-act="horse" data-num="' + h.num + '">' +
+      '<div class="horse-main">' +
+        '<span class="num-badge" data-frame="' + (h.frame || 1) + '">' + h.num + '</span>' +
+        '<div class="horse-id">' +
+          '<div class="horse-name">' + esc(h.name) + '</div>' +
+          '<div class="horse-sub">' +
+            '<span>' + esc(h.sex) + h.age + '</span><span class="sep">/</span>' +
+            '<span>' + h.weight.toFixed(1) + 'kg</span><span class="sep">/</span>' +
+            '<span>' + esc(h.jockey) + '</span><span class="sep">/</span>' +
+            '<span>' + (h.popularity || '-') + '番人気</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="horse-nums">' +
+          '<span class="prob-line"><span class="prob-value num">' + pct(h.winProb) + '</span></span>' +
+          '<span class="odds-line">単勝 ' + h.odds.toFixed(1) + '倍</span>' +
+          '<span class="ev-badge" data-tier="' + tier.key + '">EV ' + ev.toFixed(2) + '</span>' +
+        '</div>' +
+        '<span class="prob-bar"><i style="width:' + barWidth + '%"></i></span>' +
+      '</div>' + detail +
+    '</div>';
+  }
+
+  function comboBoard(pred) {
+    var board = Odds.buildComboBoard(pred);
+    var q = board.quinella.slice(0, 3).map(function (c) {
+      return '<div class="combo-row"><span class="cl">' + esc(c.label) + '</span>' +
+        '<span class="cn">' + esc(c.names) + '</span>' +
+        '<span class="cp">' + pct(c.prob) + '</span></div>';
+    }).join('');
+    var t = board.trio.slice(0, 3).map(function (c) {
+      return '<div class="combo-row"><span class="cl">' + esc(c.label) + '</span>' +
+        '<span class="cn">' + esc(c.names) + '</span>' +
+        '<span class="cp">' + pct(c.prob) + '</span></div>';
+    }).join('');
+    return '<div class="combo-grid">' + q + t + '</div>';
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 画面3: 過去検証                                             */
+  /* ---------------------------------------------------------- */
+
+  function verifyView() {
+    var bt = verification();
+    var p = bt.primary;
+
+    var stats = '<div class="stat-grid">' +
+      statCard('的中率', pct(p.hitRate), p.hits + ' / ' + p.bets + ' 点', 'accent') +
+      statCard('回収率', pct(p.roi), '投資 ' + yen(p.stake), p.roi >= 1 ? 'accent' : 'danger') +
+      statCard('損益', signedYen(p.pnl), '払戻 ' + yen(p.payout), p.pnl >= 0 ? 'accent' : 'danger') +
+    '</div>';
+
+    var table = '<div class="chart-card"><div class="chart-head"><h3>戦略別の成績</h3><span>単勝・1点1,000円</span></div>' +
+      '<table class="table"><thead><tr><th>戦略</th><th>点数</th><th>的中率</th><th>回収率</th><th>損益</th></tr></thead><tbody>' +
+      bt.strategies.map(function (s) {
+        return '<tr><td>' + esc(s.label) + '</td>' +
+          '<td>' + s.bets + '</td>' +
+          '<td>' + pct(s.hitRate) + '</td>' +
+          '<td class="' + (s.roi >= 1 ? 'pos' : 'neg') + '">' + pct(s.roi) + '</td>' +
+          '<td class="' + (s.pnl >= 0 ? 'pos' : 'neg') + '">' + signedYen(s.pnl) + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>';
+
+    var monthly = '<div class="chart-card"><div class="chart-head"><h3>月別（期待値フィルタ）</h3><span>2026年</span></div>' +
+      '<table class="table"><thead><tr><th>月</th><th>点数</th><th>的中率</th><th>回収率</th><th>損益</th></tr></thead><tbody>' +
+      bt.monthly.map(function (m) {
+        return '<tr><td>' + esc(m.month.slice(5)) + '月</td><td>' + m.bets + '</td>' +
+          '<td>' + pct(m.hitRate) + '</td><td class="' + (m.roi >= 1 ? 'pos' : 'neg') + '">' + pct(m.roi) + '</td>' +
+          '<td class="' + (m.pnl >= 0 ? 'pos' : 'neg') + '">' + signedYen(m.pnl) + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div>';
+
+    var recent = '<div class="chart-card"><div class="chart-head"><h3>直近の判定</h3><span>最新14点</span></div>' +
+      bt.recent.map(function (b) {
+        return '<div class="result-row">' +
+          '<span class="rdate">' + esc(b.date.slice(5)) + '</span>' +
+          '<span class="rmain"><span class="rticket">単勝 ' + b.num + '番 @' + b.odds.toFixed(1) + '</span>' +
+            '<span class="rsub">推定 ' + pct(b.prob) + ' / EV ' + b.ev.toFixed(2) + '</span></span>' +
+          '<span class="rres" style="color:' + (b.hit ? 'var(--accent)' : 'var(--text-3)') + '">' +
+            (b.hit ? '的中 +' + yen(b.payout - b.stake) : '不的中 -' + yen(b.stake)) + '</span>' +
+        '</div>';
+      }).join('') + '</div>';
+
+    return '<div class="section">' +
+        '<div class="section-head"><h2>過去検証</h2><span class="hint">デモ・シミュレーション</span></div>' +
+        '<div class="banner" data-tone="warn">' +
+          '<span class="banner-icon">' + icon('alert') + '</span>' +
+          '<div><strong>この数値は実際の成績ではありません</strong>' +
+          'レース結果APIが未接続のため、モデル確率を前提としたシード固定のシミュレーション（' + bt.config.races + 'レース）を実行しています。実運用の的中率・回収率ではありません。' +
+          '</div></div>' +
+        '<div style="height:12px"></div>' +
+        stats +
+        '<div class="chart-card">' +
+          '<div class="chart-head"><h3>累積損益</h3><span>' + esc(bt.config.periodFrom) + ' 〜 ' + esc(bt.config.periodTo) + '</span></div>' +
+          '<div class="chart-wrap">' + equityChart(bt.equity) + '</div>' +
+        '</div>' +
+        table +
+        monthly +
+        recent +
+        '<div class="note">' +
+          '<strong style="color:var(--text-2)">シミュレーション前提</strong><br>' +
+          'レース数 ' + bt.config.races + '／シード ' + bt.config.seed + '／1点 ' + yen(bt.config.stake) + '／期待値閾値 ' + bt.config.evThreshold.toFixed(2) +
+          '／モデル優位度 ' + bt.config.skill + '／控除率 ' + pct(bt.config.takeout, 0) + '。<br>' +
+          '控除率20%の単勝で回収率100%を超えるには、市場の想定を上回る的中が必要です。この画面は"儲かる"ことを示すためのものではありません。' +
+        '</div>' +
+      '</div>' +
+      '<p class="footnote">数値はページを開くたびに同じシードで再計算されます（毎回同じ結果）。</p>';
+  }
+
+  function statCard(label, value, sub, tone) {
+    return '<dl class="stat-card" data-tone="' + (tone || '') + '">' +
+      '<dt>' + esc(label) + '</dt>' +
+      '<dd class="num">' + esc(value) + '</dd>' +
+      '<div class="sub">' + esc(sub) + '</div></dl>';
+  }
+
+  function equityChart(equity) {
+    if (!equity || equity.length < 2) return '<div class="empty">データがありません</div>';
+    var W = 320, H = 120, PAD = 8;
+    var vals = equity.map(function (e) { return e.cumulative; });
+    var min = Math.min(0, Math.min.apply(null, vals));
+    var max = Math.max(0, Math.max.apply(null, vals));
+    var range = (max - min) || 1;
+
+    function x(i) { return PAD + (i / (equity.length - 1)) * (W - PAD * 2); }
+    function y(v) { return PAD + (1 - (v - min) / range) * (H - PAD * 2); }
+
+    var pts = equity.map(function (e, i) { return x(i).toFixed(1) + ',' + y(e.cumulative).toFixed(1); }).join(' ');
+    var zeroY = y(0).toFixed(1);
+    var last = equity[equity.length - 1];
+    var up = last.cumulative >= 0;
+    var color = up ? '#35D08A' : '#FF6B6B';
+
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="累積損益チャート">' +
+      '<defs><linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">' +
+        '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.28"/>' +
+        '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
+      '</linearGradient></defs>' +
+      '<line x1="' + PAD + '" y1="' + zeroY + '" x2="' + (W - PAD) + '" y2="' + zeroY + '" stroke="rgba(255,255,255,0.14)" stroke-dasharray="3 3" stroke-width="1"/>' +
+      '<polygon points="' + PAD + ',' + zeroY + ' ' + pts + ' ' + (W - PAD) + ',' + zeroY + '" fill="url(#eqfill)"/>' +
+      '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>' +
+      '<circle cx="' + x(equity.length - 1).toFixed(1) + '" cy="' + y(last.cumulative).toFixed(1) + '" r="3" fill="' + color + '"/>' +
+    '</svg>';
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 画面4: データ状態                                           */
+  /* ---------------------------------------------------------- */
+
+  function dataView() {
+    var s = state.snapshot || {};
+    var ds = state.dataset || {};
+    var meta = ds.dataset || {};
+    var api = Loader.liveAvailability();
+
+    var statusLabel = {
+      ready: '<span class="pill" data-tone="accent">正常</span>',
+      stale: '<span class="pill" data-tone="gold">キャッシュ</span>',
+      error: '<span class="pill" data-tone="danger">取得失敗</span>',
+      loading: '<span class="pill" data-tone="info">取得中</span>'
+    }[s.status] || '<span class="pill" data-tone="muted">待機</span>';
+
+    var kv =
+      kvRow('データソース', 'デモデータ（data/demo-races.json）') +
+      kvRow('データ種別', meta.kind === 'demo' ? 'デモ（架空の値）' : '—') +
+      kvRow('取得状態', statusLabel) +
+      kvRow('最終取得', dt(s.fetchedAt)) +
+      kvRow('データ生成日時', dt(meta.generatedAt)) +
+      kvRow('取得経路', s.transport === 'sw-cache' ? 'Service Worker キャッシュ（古い可能性）' : (s.fetchedAt ? 'ネットワーク' : '—')) +
+      kvRow('所要時間', s.elapsedMs != null ? s.elapsedMs + ' ms' : '—') +
+      kvRow('レース数', (ds.races ? ds.races.length : 0) + ' レース / ' + countHorses(ds) + ' 頭') +
+      kvRow('予測モデル', 'predictor.js v' + Predictor.VERSION + '（ソフトマックス）') +
+      kvRow('Service Worker', state.swReady ? '有効' : '未登録', 'mono');
+
+    var apiRows = api.map(function (a) {
+      return '<div class="api-row">' +
+        '<span class="ic">' + icon('lock') + '</span>' +
+        '<div class="abody">' +
+          '<div class="aname">' + esc(a.label) + '</div>' +
+          '<div class="aprov">' + esc(a.provider) + '</div>' +
+          '<div class="anote">' + esc(a.note) + '</div>' +
+        '</div>' +
+        '<span class="astat"><span class="pill" data-tone="danger">未接続</span></span>' +
+      '</div>';
+    }).join('');
+
+    var attempts = (s.attempts || []).slice(0, 4).map(function (a) {
+      return '<div class="kv-row"><dt>' + esc(hm(a.at)) + '</dt>' +
+        '<dd class="mono" style="color:' + (a.ok ? 'var(--accent)' : 'var(--danger)') + '">' +
+        (a.ok ? '成功' : '失敗') + ' — ' + esc(a.detail) + '</dd></div>';
+    }).join('');
+
+    return '<div class="section">' +
+        '<div class="section-head"><h2>データ取得状態</h2><span class="hint">' + esc(hm(s.fetchedAt) || '—') + '</span></div>' +
+        '<div class="chart-card" style="margin-top:0"><dl class="kv-list">' + kv + '</dl></div>' +
+        '<div class="note" style="border-style:solid;border-color:rgba(53,208,138,0.25);color:var(--text-2)">' +
+          '<strong style="color:var(--accent)">実データは未接続です</strong><br>' +
+          'このバージョンはデモデータのみで動作します。下記のAPIは実装しておらず、' +
+          '「取得できた」ように見せる処理も入れていません。' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>未接続の外部データ</h2><span class="hint">すべて未実装</span></div>' +
+        '<div class="chart-card" style="margin-top:0">' + apiRows + '</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>取得履歴</h2><span class="hint">直近' + (s.attempts || []).length + '件</span></div>' +
+        '<div class="chart-card" style="margin-top:0"><dl class="kv-list">' + (attempts || '<div class="kv-row"><dt>—</dt><dd>記録なし</dd></div>') + '</dl></div>' +
+        '<div class="btn-row">' +
+          '<button type="button" class="btn" data-variant="primary" data-act="reload">再取得する</button>' +
+          '<button type="button" class="btn" data-variant="ghost" data-act="fail">取得失敗を再現</button>' +
+        '</div>' +
+        '<div class="btn-row">' +
+          '<button type="button" class="btn" data-variant="ghost" data-act="clear-cache">キャッシュを削除</button>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="section">' +
+        '<div class="section-head"><h2>注意事項</h2></div>' +
+        '<div class="note">' + esc(meta.notice || '') + '<br><br>' + esc(meta.disclaimer || '') +
+        '<br><br>本アプリは投票・購入・送金の機能を持ちません。20歳未満の方は車券・馬券を購入できません。' +
+        '</div>' +
+      '</div>' +
+
+      '<p class="footnote">RaceAI demo build / schema ' + esc(ds.schemaVersion || '-') + '</p>';
+  }
+
+  function kvRow(label, value, cls) {
+    return '<div class="kv-row"><dt>' + esc(label) + '</dt>' +
+      '<dd' + (cls ? ' class="' + cls + '"' : '') + '>' + value + '</dd></div>';
+  }
+
+  function countHorses(ds) {
+    var n = 0;
+    (ds.races || []).forEach(function (r) { n += (r.horses || []).length; });
+    return n;
+  }
+
+  /* ---------------------------------------------------------- */
+  /* レンダリング                                                */
+  /* ---------------------------------------------------------- */
+
+  function currentView() {
+    if (state.route.name === 'race') return raceView(state.route.id);
+    if (state.route.name === 'verify') return verifyView();
+    if (state.route.name === 'data') return dataView();
+    return racesView();
+  }
+
+  function render() {
+    var app = document.getElementById('app');
+    var s = state.snapshot;
+
+    if (!state.dataset && state.loading) {
+      app.innerHTML = '<div class="loading-veil"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>';
+      return;
+    }
+
+    if (!state.dataset) {
+      var err = s && s.error ? s.error : { message: 'データを取得できませんでした', code: 'NO_DATA' };
+      app.innerHTML = '<div class="section" style="padding-top:24px">' +
+        '<div class="empty"><strong>データを読み込めませんでした</strong>' +
+        esc(err.message) +
+        '<div style="margin-top:14px;font-size:11px">code: ' + esc(err.code) + '</div>' +
+        '<div class="btn-row"><button type="button" class="btn" data-variant="primary" data-act="reload">再試行</button></div>' +
+        '<div class="note" style="text-align:left;margin-top:16px">' +
+        'ローカルサーバー経由で開いていますか？<br>' +
+        '<code style="font-size:11px">python3 -m http.server 8000</code> を実行し、' +
+        '<code style="font-size:11px">http://localhost:8000/</code> を開いてください。' +
+        'ファイルを直接開く（file://）と fetch がブロックされます。</div>' +
+        '</div></div>';
+      updateTabs();
+      return;
+    }
+
+    app.innerHTML = statusBar() + banners() + currentView();
+    updateTabs();
+  }
+
+  function updateTabs() {
+    var btns = document.querySelectorAll('.tabbar button');
+    var active = state.route.name === 'race' ? 'races' : state.route.name;
+    for (var i = 0; i < btns.length; i += 1) {
+      btns[i].setAttribute('aria-selected', btns[i].getAttribute('data-tab') === active ? 'true' : 'false');
+    }
+  }
+
+  /* ---------------------------------------------------------- */
+  /* データ読み込み                                              */
+  /* ---------------------------------------------------------- */
+
+  function load(forceFail) {
+    state.loading = true;
+    render();
+    var btn = document.getElementById('refresh-btn');
+    if (btn) btn.classList.add('spinning');
+
+    return Loader.load({ forceFail: !!forceFail }).then(function (snap) {
+      state.snapshot = snap;
+      state.dataset = Loader.getDataset();
+      state.predCache = {};
+      state.recCache = {};
+      state.loading = false;
+      if (btn) btn.classList.remove('spinning');
+      render();
+      return snap;
+    });
+  }
+
+  /* ---------------------------------------------------------- */
+  /* イベント                                                    */
+  /* ---------------------------------------------------------- */
+
+  document.addEventListener('click', function (e) {
+    var target = e.target.closest('[data-act]');
+    if (!target) return;
+    var act = target.getAttribute('data-act');
+
+    if (act === 'date') {
+      state.date = target.getAttribute('data-date');
+      state.expanded = null;
+      if (state.route.name !== 'races') { location.hash = '#/races'; }
+      render();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    if (act === 'org') {
+      state.org = target.getAttribute('data-org');
+      render();
+      return;
+    }
+
+    if (act === 'open-race') {
+      state.expanded = null;
+      state.sort = 'prob';
+      location.hash = '#/race/' + encodeURIComponent(target.getAttribute('data-id'));
+      return;
+    }
+
+    if (act === 'back') {
+      if (history.length > 1) history.back();
+      else location.hash = '#/races';
+      return;
+    }
+
+    if (act === 'sort') {
+      state.sort = target.getAttribute('data-sort');
+      render();
+      return;
+    }
+
+    if (act === 'horse') {
+      var num = parseInt(target.getAttribute('data-num'), 10);
+      state.expanded = state.expanded === num ? null : num;
+      render();
+      return;
+    }
+
+    if (act === 'reload') {
+      load(false);
+      return;
+    }
+
+    if (act === 'fail') {
+      load(true);
+      return;
+    }
+
+    if (act === 'clear-cache') {
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_CACHES' });
+      }
+      if (window.caches && caches.keys) {
+        caches.keys().then(function (keys) {
+          keys.forEach(function (k) { caches.delete(k); });
+        });
+      }
+      state.cacheCleared = true;
+      state.date = null;
+      state.verification = null;
+      load(false);
+      return;
+    }
+  });
+
+  document.getElementById('refresh-btn').addEventListener('click', function () {
+    load(false);
+  });
+
+  document.querySelectorAll('.tabbar button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      location.hash = '#/' + btn.getAttribute('data-tab');
+      window.scrollTo({ top: 0 });
+    });
+  });
+
+  window.addEventListener('hashchange', function () {
+    state.route = parseHash();
+    state.expanded = null;
+    render();
+    window.scrollTo({ top: 0 });
+  });
+
+  /* Service Worker 登録（http/https のみ） */
+  function registerSW() {
+    if (!('serviceWorker' in navigator)) return;
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+    navigator.serviceWorker.register('sw.js').then(function () {
+      state.swReady = true;
+    }).catch(function () {
+      state.swReady = false;
+    });
+  }
+
+  /* ---------------------------------------------------------- */
+  /* 起動                                                        */
+  /* ---------------------------------------------------------- */
+
+  state.route = parseHash();
+  registerSW();
+  load(forceFailOnce);
+})();
+</script>
+</body>
+</html>
